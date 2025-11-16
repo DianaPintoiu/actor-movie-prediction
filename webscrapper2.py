@@ -21,10 +21,6 @@ def get_soup(url):
 
 
 def find_wikipedia_page(title, max_retries=3):
-    """
-    Stable Wikipedia search using API.
-    Prevents infinite loops and rate-limit issues.
-    """
     api_url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "query",
@@ -37,7 +33,6 @@ def find_wikipedia_page(title, max_retries=3):
         try:
             r = requests.get(api_url, params=params, headers=HEADERS, timeout=10)
 
-            # Wikipedia sometimes returns HTML during rate limit
             if "text/html" in r.headers.get("Content-Type", ""):
                 print(f"[WARN] Rate limit for '{title}'. Retry {attempt+1}/{max_retries}...")
                 time.sleep(3 + attempt * 2)
@@ -129,8 +124,8 @@ def scrape_wikipedia_for_all(imdb_csv, output_csv="wikipedia_all.csv"):
     out = pd.DataFrame(results, columns=["title", "budget", "language", "box_office", "country"])
     out.to_csv(output_csv, index=False, encoding="utf-8-sig")
 
-    print(f"\n💾 Saved: {output_csv}")
+    print(f"\n Saved in : {output_csv}")
 
 
 def main():
-    scrape_wikipedia_for_all("movies_full.csv")
+    scrape_wikipedia_for_all("movies.csv")
