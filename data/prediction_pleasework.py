@@ -14,19 +14,14 @@ STATS_PATH = "actor_coverage_stats.csv"
 
 TOP_GENRES = 8          # restul -> Other
 GEN_WINDOW_YEARS = 5    # preferințe de gen pe ultimii 5 ani
-
+NEXT_YEARS = 3          # t+1..t+3
 
 def split_pipe(s):
     if pd.isna(s):
         return []
     return [x.strip() for x in str(s).split("|") if x.strip()]
 
-
 def success_level(r, p):
-    """
-    Rebalansat față de varianta ta inițială, ca să nu ai Miss ~ 0 exemple.
-    Ajustează pragurile dacă vrei.
-    """
     if pd.isna(r) or pd.isna(p):
         return None
     if (p < 45) or (r < 5.8):
@@ -34,7 +29,6 @@ def success_level(r, p):
     if (p >= 75) and (r >= 7.0):
         return "Hit"
     return "Mid"
-
 
 def bo_outcome(roi):
     if pd.isna(roi) or np.isinf(roi):
@@ -44,7 +38,6 @@ def bo_outcome(roi):
     if roi < 2.5:
         return "Break-even"
     return "Success"
-
 
 # =========================
 # Load
@@ -111,7 +104,6 @@ if has_bo:
 else:
     print("⚠️ budget/box_office not found in edges -> box office target will be skipped.")
 
-
 # =========================
 # Merge labels onto actor-year features
 # =========================
@@ -149,18 +141,15 @@ gy = (
 )
 
 gy = gy.sort_values(["actor", "year"])
-
 gy_pivot = gy.pivot_table(index=["actor", "year"], columns="genre", values="cnt", aggfunc="sum", fill_value=0).reset_index()
 genre_cols = [c for c in gy_pivot.columns if c not in ["actor", "year"]]
 
 def roll_genre_shares(g):
     g = g.sort_values("year").copy()
-    # rolling sums
     for col in genre_cols:
         g[f"{col}_cnt_last5y"] = g[col].rolling(GEN_WINDOW_YEARS, min_periods=1).sum()
     g["genre_total_last5y"] = g[[f"{c}_cnt_last5y" for c in genre_cols]].sum(axis=1)
 
-    # shares
     for col in genre_cols:
         g[f"{col}_share_last5y"] = (
             g[f"{col}_cnt_last5y"] / g["genre_total_last5y"].replace(0, np.nan)
@@ -169,6 +158,7 @@ def roll_genre_shares(g):
     keep_cols = ["actor", "year"] + [f"{c}_share_last5y" for c in genre_cols]
     return g[keep_cols]
 
+# warning-ul de pandas e ok; dacă vrei să-l elimini, poți adăuga include_groups=False (depinde de versiunea ta)
 genre_pref = gy_pivot.groupby("actor", group_keys=False).apply(roll_genre_shares)
 
 data = data.merge(genre_pref, on=["actor", "year"], how="left")
@@ -177,24 +167,44 @@ for c in data.columns:
         data[c] = data[c].fillna(0.0)
 
 # =========================
-# Next-year targets (t -> t+1)
+# Targets: NEXT 3 YEARS (t -> t+1..t+3)
 # =========================
-data["dominant_genre_next"] = data.groupby("actor")["dominant_genre"].shift(-1)
-data["success_level_next"] = data.groupby("actor")["success_level"].shift(-1)
-if actor_year_bo is not None:
-    data["box_office_outcome_next"] = data.groupby("actor")["box_office_outcome"].shift(-1)
+def mode_next_k(series, i, k):
+    w = series.iloc[i+1:i+1+k].dropna()
+    if len(w) == 0:
+        return None
+    return w.value_counts().index[0]
 
-target_cols = ["dominant_genre_next", "success_level_next"] + (["box_office_outcome_next"] if actor_year_bo is not None else [])
+def any_label_next_k(series, i, k, label):
+    w = series.iloc[i+1:i+1+k].dropna()
+    if len(w) == 0:
+        return None
+    return int((w == label).any())
+
+def build_next3_targets(g):
+    g = g.sort_values("year").reset_index(drop=True)
+
+    g["dominant_genre_next3y"] = [mode_next_k(g["dominant_genre"], i, NEXT_YEARS) for i in range(len(g))]
+    g["hit_next3y"] = [any_label_next_k(g["success_level"], i, NEXT_YEARS, "Hit") for i in range(len(g))]
+
+    if "box_office_outcome" in g.columns:
+        g["box_success_next3y"] = [any_label_next_k(g["box_office_outcome"], i, NEXT_YEARS, "Success") for i in range(len(g))]
+
+    return g
+
+data = data.groupby("actor", group_keys=False).apply(build_next3_targets)
+
+target_cols = ["dominant_genre_next3y", "hit_next3y"]
+if "box_success_next3y" in data.columns:
+    target_cols.append("box_success_next3y")
 
 # =========================
-# Features (numeric + genre shares + (optional) financial aggregates if present in actor_year)
+# Features (numeric + genre shares + optional financial aggregates)
 # =========================
 base_num = ["n_movies", "lead_ratio", "avg_rating", "avg_votes", "avg_popularity", "n_genres"]
 base_num = [c for c in base_num if c in data.columns]
 
-# dacă ai în actor_year_features și financial aggregates (din scriptul nou)
 financial = [c for c in ["avg_budget", "avg_box_office", "avg_roi"] if c in data.columns]
-
 share_cols = [c for c in data.columns if c.endswith("_share_last5y")]
 
 feature_cols = base_num + financial + share_cols
@@ -206,10 +216,10 @@ ml = data.dropna(subset=target_cols + feature_cols).copy()
 # =========================
 split_year = int(ml["year"].quantile(0.8))
 train = ml[ml["year"] <= split_year]
-test = ml[ml["year"] > split_year]
+test  = ml[ml["year"] > split_year]
 
 X_train, Y_train = train[feature_cols], train[target_cols]
-X_test, Y_test = test[feature_cols], test[target_cols]
+X_test,  Y_test  = test[feature_cols], test[target_cols]
 
 print("Train:", X_train.shape, "Test:", X_test.shape)
 print("Targets:", target_cols)
@@ -217,7 +227,6 @@ print("Top genres:", sorted(list(top_genres)))
 
 # =========================
 # One single model (multi-output)
-# Using boosting (usually better than RF on tabular)
 # =========================
 model = MultiOutputClassifier(
     HistGradientBoostingClassifier(
@@ -228,13 +237,63 @@ model = MultiOutputClassifier(
     )
 )
 
-model.fit(X_train, Y_train)
-pred = model.predict(X_test)
+from sklearn.preprocessing import LabelEncoder
+
+# =========================
+# Encode targets (fix float/str mixing)
+# =========================
+encoders = {}
+Y_train_enc = pd.DataFrame(index=Y_train.index)
+Y_test_enc  = pd.DataFrame(index=Y_test.index)
+
+for col in target_cols:
+    le = LabelEncoder()
+
+    # forțăm string ca să evităm float vs str (de la NaN/None)
+    ytr = Y_train[col].astype(str)
+    yte = Y_test[col].astype(str)
+
+    Y_train_enc[col] = le.fit_transform(ytr)
+
+    # map test labels -> train label space; necunoscute devin -1
+    test_map = {cls: i for i, cls in enumerate(le.classes_)}
+    Y_test_enc[col] = yte.map(test_map).fillna(-1).astype(int)
+
+    encoders[col] = le
+
+# păstrează doar rândurile din test unde toate target-urile sunt cunoscute
+mask_ok = (Y_test_enc[target_cols] >= 0).all(axis=1)
+X_test2 = X_test.loc[mask_ok].copy()
+Y_test2 = Y_test.loc[mask_ok].copy()
+Y_test_enc2 = Y_test_enc.loc[mask_ok].copy()
+
+print("Test kept after unseen-label filter:", X_test2.shape)
+
+# =========================
+# Train + Predict
+# =========================
+model = MultiOutputClassifier(
+    HistGradientBoostingClassifier(
+        max_depth=6,
+        learning_rate=0.08,
+        max_iter=300,
+        random_state=42
+    )
+)
+
+model.fit(X_train, Y_train_enc)
+pred_enc = model.predict(X_test2)
+
+# decode predictions back to original labels (pt rapoarte)
+pred = pd.DataFrame(index=X_test2.index)
+for i, col in enumerate(target_cols):
+    pred[col] = encoders[col].inverse_transform(pred_enc[:, i])
 
 # =========================
 # Reports
 # =========================
-for i, col in enumerate(target_cols):
+for col in target_cols:
     print("\n==============================")
     print("Target:", col)
-    print(classification_report(Y_test[col], pred[:, i], zero_division=0))
+    print(classification_report(Y_test2[col].astype(str), pred[col].astype(str), zero_division=0))
+
